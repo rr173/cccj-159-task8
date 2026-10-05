@@ -24,21 +24,25 @@ from typing import Any, Callable
 from .domain import (DomainError, canonical_bytes, canonical_hash,
                      delivery_number, parse_layer_inventory, scan_gds_layers,
                      LayoutScanError)
+from .custody import CustodyMixin
 from .importer import Importer, ROLE_RANK
 from .store import Store, utcnow
 
 DEFAULT_TTL_SECONDS = 300
+DEFAULT_HANDOFF_TTL_SECONDS = 3600
 
 
 def parse_ts(s: str) -> datetime:
     return datetime.fromisoformat(s.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
-class Service:
-    def __init__(self, store: Store, ttl_seconds: int = DEFAULT_TTL_SECONDS):
+class Service(CustodyMixin):
+    def __init__(self, store: Store, ttl_seconds: int = DEFAULT_TTL_SECONDS,
+                 handoff_ttl_seconds: int = DEFAULT_HANDOFF_TTL_SECONDS):
         self.s = store
         self.importer = Importer(store)
         self.ttl = int(ttl_seconds)
+        self.handoff_ttl = int(handoff_ttl_seconds)
         self.recover_on_startup()
 
     # ================================================================ 身份
@@ -61,7 +65,8 @@ class Service:
 
     def create_person(self, actor: str, person_id: str, name: str, roles: list[str]):
         self.require_role(actor, "ADMIN")
-        valid = {"ME", "STEWARD", "DISPATCHER", "ADMIN"}
+        valid = {"ME", "STEWARD", "DISPATCHER", "ADMIN",
+                 "KEEPER", "CUSTODIAN", "SAFETY", "PROCESS"}
         if not set(roles) <= valid:
             raise DomainError("INVALID_ROLES", f"角色必须是 {sorted(valid)} 的子集", 400)
         if self.s.q_one("SELECT 1 FROM person WHERE id=?", (person_id,)):
@@ -1264,8 +1269,11 @@ class Service:
         """进程异常退出后：
         1) BUILDING 交付包 → 依据持久状态继续构建；
         2) PENDING 且未过期的操作 → 视为裁决中断，过期作废，不自动重放副作用；
-        3) 窗口/仲裁全部已在各自事务中落盘，天然一致。
+        3) 窗口/仲裁全部已在各自事务中落盘，天然一致；
+        4) 已超过确认期限的 PENDING 交接 → 清除失效冻结并置 EXPIRED，
+           使版匣回到交接申请前状态，接续其余待办。
         """
+        recovered_handoffs = self._recover_handoffs()
         with self.s.tx() as c:
             pending_ops = c.execute(
                 "SELECT id FROM operation WHERE status='PENDING'").fetchall()
@@ -1296,10 +1304,12 @@ class Service:
                 with self.s.tx() as c:
                     c.execute("UPDATE package SET status='FAILED',error=?,finished_at=?"
                               " WHERE id=?", (str(ex), utcnow(), b["id"]))
-        if expired or building:
+        if expired or building or recovered_handoffs:
             with self.s.tx() as c:
                 self.s.audit(c, "system", "startup.recover", None,
                              detail={"expired_ops": expired,
-                                     "resumed_packages": [b["id"] for b in building]})
+                                     "resumed_packages": [b["id"] for b in building],
+                                     "expired_handoffs": recovered_handoffs})
         return {"expired_operations": expired,
-                "resumed_packages": [b["id"] for b in building]}
+                "resumed_packages": [b["id"] for b in building],
+                "expired_handoffs": recovered_handoffs}

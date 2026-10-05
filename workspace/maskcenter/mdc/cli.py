@@ -45,6 +45,51 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("packages")
     sub.add_parser("quarantine")
     sub.add_parser("arbitrations")
+    sp = sub.add_parser("pods"); sp.add_argument("--status")
+    sp = sub.add_parser("pod"); sp.add_argument("key")
+    sp = sub.add_parser("custody"); sp.add_argument("key")
+    sp = sub.add_parser("handoffs"); sp.add_argument("--status"); sp.add_argument("--pod")
+    sp.add_argument("--person")
+    sp = sub.add_parser("todos"); sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("inspections"); sp.add_argument("--pod")
+    sp = sub.add_parser("investigations"); sp.add_argument("--status")
+    sub.add_parser("custody-exceptions")
+
+    sp = sub.add_parser("pod-register")
+    sp.add_argument("--tag", required=True); sp.add_argument("--cabinet", default="")
+    sp.add_argument("--holder", required=True); sp.add_argument("--set")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", default="u_keeper")
+    sp = sub.add_parser("handoff-request")
+    sp.add_argument("--tag", required=True)
+    sp.add_argument("--direction", required=True, choices=["OUTBOUND", "INBOUND"])
+    sp.add_argument("--giver", required=True); sp.add_argument("--receiver", required=True)
+    sp.add_argument("--deadline"); sp.add_argument("--cabinet"); sp.add_argument("--note", default="")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("handoff-confirm")
+    sp.add_argument("handoff"); sp.add_argument("--side", required=True,
+                                                choices=["GIVER", "RECEIVER"])
+    sp.add_argument("--inspection", choices=["OK", "TAG_DAMAGED"])
+    sp.add_argument("--note", default=""); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("handoff-cancel"); sp.add_argument("handoff"); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("handoff-amend"); sp.add_argument("handoff")
+    sp.add_argument("--giver", required=True); sp.add_argument("--receiver", required=True)
+    sp.add_argument("--deadline"); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("pod-inspect"); sp.add_argument("key")
+    sp.add_argument("--result", required=True, choices=["OK", "TAG_DAMAGED"])
+    sp.add_argument("--note", default=""); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", default="u_keeper")
+    sp = sub.add_parser("pod-release-line"); sp.add_argument("key"); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", default="u_keeper")
+    sp = sub.add_parser("investigation-open"); sp.add_argument("key")
+    sp.add_argument("--reason", required=True); sp.add_argument("--evidence", default="")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", default="u_safety")
+    sp = sub.add_parser("investigation-confirm"); sp.add_argument("investigation")
+    sp.add_argument("--role", required=True, choices=["SAFETY", "PROCESS"])
+    sp.add_argument("--new-holder", required=True); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", required=True)
     sp = sub.add_parser("audit"); sp.add_argument("--target"); sp.add_argument("--op")
 
     sp = sub.add_parser("upload")
@@ -142,6 +187,49 @@ def main(argv=None) -> int:
             _print(svc.list_packages())
         elif c == "quarantine":
             _print(svc.list_quarantine())
+        elif c == "pods":
+            _print(svc.list_pods(args.status))
+        elif c == "pod":
+            _print(svc.get_pod(args.key))
+        elif c == "custody":
+            _print(svc.custody_timeline(args.key))
+        elif c == "handoffs":
+            _print(svc.list_handoffs(args.status, args.pod, args.person))
+        elif c == "todos":
+            _print(svc.list_todos(args.actor))
+        elif c == "inspections":
+            _print(svc.list_inspections(args.pod))
+        elif c == "investigations":
+            _print(svc.list_investigations(args.status))
+        elif c == "custody-exceptions":
+            _print(svc.custody_exceptions())
+        elif c == "pod-register":
+            _print(svc.register_pod(args.actor, args.tag, args.cabinet,
+                                    args.holder, args.set, args.op))
+        elif c == "handoff-request":
+            _print(svc.request_handoff(args.actor, args.tag, args.direction,
+                                       args.giver, args.receiver, args.deadline,
+                                       args.cabinet, args.note, args.op))
+        elif c == "handoff-confirm":
+            _print(svc.confirm_handoff(args.actor, args.handoff, args.side,
+                                       args.note, args.inspection, args.op))
+        elif c == "handoff-cancel":
+            _print(svc.cancel_handoff(args.actor, args.handoff, args.op))
+        elif c == "handoff-amend":
+            _print(svc.amend_handoff(args.actor, args.handoff, args.giver,
+                                     args.receiver, args.deadline, args.op))
+        elif c == "pod-inspect":
+            _print(svc.inspect_pod(args.actor, args.key, args.result,
+                                   args.note, args.op))
+        elif c == "pod-release-line":
+            _print(svc.release_pod_to_line(args.actor, args.key, args.op))
+        elif c == "investigation-open":
+            _print(svc.open_investigation(args.actor, args.key, args.reason,
+                                          args.evidence, args.op))
+        elif c == "investigation-confirm":
+            _print(svc.confirm_investigation_release(
+                args.actor, args.investigation, args.role,
+                args.new_holder, args.op))
         elif c == "arbitrations":
             _print([dict(r) for r in svc.s.q_all(
                 "SELECT * FROM arbitration ORDER BY decided_at DESC")])

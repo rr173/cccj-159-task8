@@ -8,7 +8,8 @@ const view = $("#view"), nav = $("#nav"), actorSel = $("#actor");
 const TABS = [
   ["dashboard", "总览"], ["content", "资料上传"], ["import", "发行导入"],
   ["artifacts", "构件关系"], ["sets", "发行 / Mask Set"],
-  ["schedule", "曝光排程"], ["replace", "替换与返工"], ["packages", "交付包"],
+  ["schedule", "曝光排程"], ["custody", "版匣保管交接"],
+  ["replace", "替换与返工"], ["packages", "交付包"],
   ["quarantine", "隔离处置"], ["audit", "审计 / 裁决"],
 ];
 
@@ -77,9 +78,10 @@ const PAGES = {};
 // --------------------------------------------------------------- 总览
 PAGES.dashboard = async () => {
   view.innerHTML = `<div class="card"><h2>中心状态</h2><div id="d"></div></div>`;
-  const [sets, lots, windows, pkgs, q] = await Promise.all([
+  const [sets, lots, windows, pkgs, q, pods, todos, invs] = await Promise.all([
     api("/api/sets"), api("/api/lots"), api("/api/windows"),
-    api("/api/packages"), api("/api/quarantine?status=PENDING")]);
+    api("/api/packages"), api("/api/quarantine?status=PENDING"),
+    api("/api/pods"), api("/api/todos"), api("/api/investigations?status=OPEN")]);
   const counts = (rows, key) => rows.reduce((a, r) =>
     (a[r[key]] = (a[r[key]] || 0) + 1, a), {});
   $("#d").innerHTML = `
@@ -99,9 +101,14 @@ PAGES.dashboard = async () => {
       <div><b>待处置隔离</b><div class="pillline">${
         q.length ? `<span class="tag t-QUARANTINED">PENDING×${q.length}</span>`
                  : '<span class="muted">无</span>'}</div></div>
+      <div><b>实体版匣</b><div class="pillline">${
+        Object.entries(counts(pods, "status")).map(([k, v]) =>
+          `${tag(k)}×${v}`).join(" ") || '<span class="muted">无</span>'}</div>
+        <div class="muted">我的待办 ${todos.length} · 开放调查 ${invs.length}</div></div>
     </div>
     <p class="muted" style="margin-top:14px">稳定交付编号在"发行导入"成功后生成（<code>MS-…</code>）；
-    排程抢占由系统产生唯一赢家；曝光一旦开始，原节点永久封存。</p>`;
+    排程抢占由系统产生唯一赢家；曝光一旦开始，原节点永久封存。
+    版匣出库/入库由交出者与接收者分开确认，双方确认结束前不得发生产线（见"版匣保管交接"）。</p>`;
 };
 
 // --------------------------------------------------------------- 上传
@@ -391,6 +398,186 @@ PAGES.schedule = async () => {
     } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
   };
   refreshWins();
+};
+
+// --------------------------------------------------------------- 版匣保管交接
+PAGES.custody = async () => {
+  view.innerHTML = `
+  <div class="card"><h2>库房登记（防拆标签 / 柜位 / 责任人）</h2>
+    <div class="row">
+      <div class="field"><label>防拆标签号码</label><input id="ctag" placeholder="TAG-…"></div>
+      <div class="field"><label>柜位</label><input id="ccab" placeholder="A-01-03"></div>
+      <div class="field"><label>责任人（保管责任人）</label><select id="cholder"></select></div>
+      <button class="btn" id="creg">登记版匣</button>
+    </div>
+  </div>
+  <div class="card"><h2>扫码申请交接（每笔只认一个接收者）</h2>
+    <div class="grid">
+      <div class="field"><label>标签号码</label><input id="htag"></div>
+      <div class="field"><label>方向</label><select id="hdir">
+        <option value="OUTBOUND">出库 OUTBOUND</option>
+        <option value="INBOUND">入库 INBOUND</option></select></div>
+      <div class="field"><label>交出者</label><select id="hgiver"></select></div>
+      <div class="field"><label>接收者（唯一）</label><select id="hrecv"></select></div>
+      <div class="field"><label>入库归位柜位（入库用）</label><input id="hcab"></div>
+      <div class="field"><label>确认期限（留空=默认）</label><input id="hdl" placeholder="2030-01-01T00:00:00Z"></div>
+      <div class="field"><label>操作编号（可选）</label><input id="hop"></div>
+    </div>
+    <div class="row" style="margin-top:8px">
+      <button class="btn" id="hgo">申请交接</button></div>
+    <div class="muted">标签错误、无对应职责、被另一申请冻结、期限已过都会留下申请并给出拒绝原因。</div>
+  </div>
+  <div class="card"><h2>我的待办（当前登录人）</h2><div id="todos"></div></div>
+  <div class="card"><h2>版匣与保管关系</h2>
+    <div class="row"><div class="field"><label>版匣 id / 标签</label><input id="pkey">
+      </div><button class="btn sec" id="pq">查询保管链</button></div>
+    <div id="pdetail" style="margin-top:10px"></div>
+    <div id="pods" style="margin-top:12px"></div>
+  </div>
+  <div class="card"><h2>交接记录 / 异常详情</h2>
+    <div class="row">
+      <select id="hf"><option value="">全部状态</option>
+        <option>PENDING</option><option>CONFIRMED</option>
+        <option>REJECTED</option><option>CANCELLED</option><option>EXPIRED</option></select>
+      <button class="btn sec" id="hl">刷新</button></div>
+    <div id="hlst" style="margin-top:10px"></div>
+    <h3 style="margin-top:14px">异常详情</h3><div id="exc"></div>
+    <h3>调查</h3><div id="invs" style="margin-top:6px"></div></div>`;
+  const people = await api("/api/people");
+  const custs = people.filter(p => p.roles.includes("CUSTODIAN"));
+  const opt = p => `<option value="${p.id}">${esc(p.name)}</option>`;
+  $("#cholder").innerHTML = custs.map(opt).join("");
+  $("#hgiver").innerHTML = custs.map(opt).join("");
+  $("#hrecv").innerHTML = custs.map(opt).join("");
+  $("#creg").onclick = async () => {
+    try { const r = await api("/api/pods", {method: "POST", json: {
+      tag_no: $("#ctag").value.trim(), cabinet: $("#ccab").value.trim(),
+      responsible_person: $("#cholder").value}});
+      toast(`版匣已登记 ${r.tag_no} → ${r.cabinet}`, "ok"); PAGES.custody();
+    } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
+  };
+  $("#hgo").onclick = async () => {
+    try { const r = await api("/api/handoffs", {method: "POST", json: {
+      tag_no: $("#htag").value.trim(), direction: $("#hdir").value,
+      giver: $("#hgiver").value, receiver: $("#hrecv").value,
+      cabinet: $("#hcab").value || null,
+      deadline_ts: $("#hdl").value || null}, op: $("#hop").value || undefined});
+      if (r.status === "PENDING") toast(`交接 ${r.handoff_id} 已冻结版匣，等待双方确认`, "ok");
+      else toast(`申请被拒（已留痕）：${r.reject_code}\n${r.reject_message}`, "err", 9000);
+      PAGES.custody();
+    } catch (e) { toast(`${e.error}: ${e.message}`, "err", 9000); }
+  };
+  $("#pq").onclick = showPod;
+  $("#hl").onclick = loadAll;
+
+  async function showPod() {
+    const key = $("#pkey").value.trim(); if (!key) return;
+    try {
+      const p = await api("/api/pods/" + key);
+      $("#pdetail").innerHTML = `
+        <div class="pillline"><b>${esc(p.tag_no)}</b> ${tag(p.status)}
+          <span class="muted">柜位 ${esc(p.cabinet)} · 责任人 ${esc(p.responsible_name)}</span>
+          ${p.frozen_by_handoff ? tag("PENDING") + "冻结中" : ""}
+          ${p.line_released_at ? `<span class="tag t-EXECUTED">已发线 ${tsShort(p.line_released_at)}</span>` : ""}
+        </div>
+        ${p.open_investigation ? `<div class="finding error">调查 ${p.open_investigation.id}：${esc(p.open_investigation.reason)}</div>` : ""}
+        <h4>历次保管关系</h4>
+        <table><thead><tr><th>#</th><th>持有人</th><th>柜位</th><th>原因</th><th>开始</th><th>结束</th><th>交接</th></tr></thead><tbody>${
+          p.custody_chain.map((c, i) => `<tr><td>${i+1}</td><td>${esc(c.holder_person)}</td>
+            <td>${esc(c.cabinet)}</td><td>${tag(c.reason)}</td>
+            <td>${tsShort(c.started_at)}</td><td>${tsShort(c.ended_at)}</td>
+            <td class="mono">${esc(c.handoff_id || "")}</td></tr>`).join("")}
+        </tbody></table>
+        <div class="row" style="margin-top:8px">
+          <button class="btn sec" onclick="inspectOk('${p.id}')">入库检查：标签完好</button>
+          <button class="btn danger" onclick="inspectDamaged('${p.id}')">入库检查：标签破损→调查</button>
+          <button class="btn" onclick="releaseLine('${p.id}')">双方确认后发生产线</button></div>`;
+    } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
+  }
+  window.inspectOk = async id => inspectPod(id, "OK");
+  window.inspectDamaged = async id => inspectPod(id, "TAG_DAMAGED");
+  async function inspectPod(id, result) {
+    try { const r = await api(`/api/pods/${id}/inspect`, {method: "POST", json: {result}});
+      toast(result === "TAG_DAMAGED" ? `已转入调查 ${r.investigation_id}` : "检查完好已留痕",
+            result === "TAG_DAMAGED" ? "err" : "ok");
+      loadAll();
+    } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
+  }
+  window.releaseLine = async id => {
+    try { const r = await api(`/api/pods/${id}/release-line`, {method: "POST", json: {}});
+      toast(`已发生产线 ${tsShort(r.line_released_at)}`, "ok"); loadAll();
+    } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
+  };
+
+  async function loadAll() {
+    const [pods, todos, hs, exc, invs] = await Promise.all([
+      api("/api/pods"), api("/api/todos"),
+      api("/api/handoffs" + ($("#hf").value ? `?status=${$("#hf").value}` : "")),
+      api("/api/custody-exceptions"), api("/api/investigations")]);
+    $("#pods").innerHTML = `<h4>在库 / 流转版匣（${pods.length}）</h4>
+      <table><thead><tr><th>标签</th><th>柜位</th><th>责任人</th><th>状态</th><th>冻结</th><th></th></tr></thead><tbody>${
+      pods.map(p => `<tr><td><b>${esc(p.tag_no)}</b></td><td>${esc(p.cabinet)}</td>
+        <td>${esc(p.responsible_person)}</td><td>${tag(p.status)}</td>
+        <td class="mono">${esc(p.frozen_by_handoff || "")}</td>
+        <td><a onclick="document.getElementById('pkey').value='${p.tag_no}';document.getElementById('pq').click()">保管链</a></td></tr>`)
+        .join("") || '<tr><td colspan=6 class=muted>无</td></tr>'}</tbody></table>`;
+    $("#todos").innerHTML = todos.length
+      ? `<table><thead><tr><th>交接</th><th>标签</th><th>方向</th><th>待我确认</th><th>期限</th><th></th></tr></thead><tbody>${
+        todos.map(t => `<tr><td class="mono">${t.id}</td><td>${esc(t.tag_no)}</td>
+          <td>${tag(t.direction)}</td><td>${t.waiting_for_me.map(tag).join(" ")}</td>
+          <td>${tsShort(t.deadline_ts)}</td>
+          <td>${t.waiting_for_me.map(s => `<button class="btn" onclick="doConfirm('${t.id}','${s}')">${s} 确认</button>`).join(" ")}</td></tr>`)
+        .join("")}</tbody></table>`
+      : '<div class="muted">无待办</div>';
+    window.doConfirm = async (id, side) => {
+      try { const r = await api(`/api/handoffs/${id}/confirm`,
+        {method: "POST", json: {side}});
+        toast(r.status === "CONFIRMED" ? "交接完成，保管权已移交" : "已记录一方确认，等待对方", "ok");
+        loadAll();
+      } catch (e) { toast(`${e.error}: ${e.message}`, "err", 9000); loadAll(); }
+    };
+    $("#hlst").innerHTML = `<table><thead><tr><th>交接</th><th>标签</th><th>方向</th>
+      <th>交出→接收</th><th>状态/拒绝原因</th><th>确认</th><th>期限</th><th>操作</th></tr></thead><tbody>${
+      hs.map(h => `<tr><td class="mono">${h.id}</td><td>${esc(h.tag_no)}</td>
+        <td>${tag(h.direction)}</td><td>${esc(h.giver_id)} → ${esc(h.receiver_id)}</td>
+        <td>${tag(h.status)}${h.reject_code ? `<div class="finding error">${esc(h.reject_code)}<br>${esc(h.reject_message)}</div>` : ""}</td>
+        <td>${(h.confirmations||[]).map(c => `${esc(c.side)}:${esc(c.person_id)}`).join("<br>") || "—"}</td>
+        <td>${tsShort(h.deadline_ts)}</td>
+        <td>${h.status === "PENDING" ? `<a onclick="cancelH('${h.id}')">撤销</a>` : ""}</td></tr>`)
+        .join("") || '<tr><td colspan=8 class=muted>无</td></tr>'}</tbody></table>`;
+    window.cancelH = async id => {
+      try { await api(`/api/handoffs/${id}/cancel`, {method: "POST", json: {}});
+        toast("已撤销", "ok"); loadAll();
+      } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
+    };
+    $("#exc").innerHTML = `
+      <table><thead><tr><th>类型</th><th>对象</th><th>原因</th><th>时间</th></tr></thead><tbody>${
+      exc.rejected_handoffs.map(h => `<tr><td>被拒交接</td><td class="mono">${h.id}</td>
+        <td>${esc(h.reject_code)} ${esc(h.reject_message)}</td><td>${tsShort(h.requested_at)}</td></tr>`)
+        .concat(exc.damaged_inspections.map(i => `<tr><td>标签破损</td><td class="mono">${i.pod_id}</td>
+          <td>${esc(i.note)}</td><td>${tsShort(i.at)}</td></tr>`)).join("") ||
+        '<tr><td colspan=4 class=muted>无异常</td></tr>'}</tbody></table>`;
+    $("#invs").innerHTML = `<table><thead><tr><th>调查</th><th>版匣</th><th>原因</th>
+      <th>状态</th><th>确认</th><th>解除（双不同自然人）</th></tr></thead><tbody>${
+      invs.map(i => `<tr><td class="mono">${i.id}</td><td>${i.pod_id}</td>
+        <td>${esc(i.reason)}</td><td>${tag(i.status)}</td>
+        <td>${(i.confirmations||[]).map(c => `${esc(c.role)}:${esc(c.person_id)}`).join(" ") || "—"}</td>
+        <td>${i.status === "OPEN"
+          ? `<button class="btn sec" onclick="invSafe('${i.id}')">安全员确认</button>
+             <button class="btn sec" onclick="invProc('${i.id}')">工艺负责人确认</button>` : "—"}</td></tr>`)
+        .join("") || '<tr><td colspan=6 class=muted>无</td></tr>'}</tbody></table>`;
+    window.invSafe = id => invConfirm(id, "SAFETY");
+    window.invProc = id => invConfirm(id, "PROCESS");
+    async function invConfirm(id, role) {
+      const holder = $("#cholder").value;
+      try { const r = await api(`/api/investigations/${id}/confirm`,
+        {method: "POST", json: {role, new_holder: holder}});
+        toast(r.status === "RELEASED" ? "调查解除，版匣回到在库" : `${role} 已确认，等待另一角色`, "ok");
+        loadAll();
+      } catch (e) { toast(`${e.error}: ${e.message}`, "err", 9000); }
+    }
+  }
+  loadAll();
 };
 
 // --------------------------------------------------------------- 替换 / 返工

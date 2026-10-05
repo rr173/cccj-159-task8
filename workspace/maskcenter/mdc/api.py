@@ -68,6 +68,25 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._json({"ok": True})
             if path == "/api/people":
                 return self._json(svc.list_people())
+            if path == "/api/pods":
+                return self._json(svc.list_pods(q.get("status", [None])[0]))
+            if path == "/api/handoffs":
+                return self._json(svc.list_handoffs(
+                    q.get("status", [None])[0], q.get("pod", [None])[0],
+                    q.get("person", [None])[0]))
+            if path == "/api/todos":
+                who = q.get("person", [None])[0] or self._actor()
+                return self._json(svc.list_todos(who))
+            if path == "/api/inspections":
+                return self._json(svc.list_inspections(q.get("pod", [None])[0]))
+            if path == "/api/investigations":
+                return self._json(svc.list_investigations(q.get("status", [None])[0]))
+            if path == "/api/custody-exceptions":
+                return self._json(svc.custody_exceptions())
+            if path.startswith("/api/custody/"):
+                return self._json(svc.custody_timeline(path.rsplit("/", 1)[1]))
+            if path.startswith("/api/pods/"):
+                return self._json(svc.get_pod(path.rsplit("/", 1)[1]))
             if path == "/api/artifacts":
                 return self._json(svc.list_artifacts())
             if path == "/api/releases":
@@ -159,6 +178,42 @@ class ApiHandler(BaseHTTPRequestHandler):
             if path == "/api/people":
                 return self._json(svc.create_person(
                     actor, body["id"], body["name"], body.get("roles", [])), 201)
+            if path == "/api/pods":
+                return self._json(svc.register_pod(
+                    actor, body["tag_no"], body.get("cabinet", ""),
+                    body["responsible_person"], body.get("set"), op), 201)
+            if path == "/api/handoffs":
+                return self._json(svc.request_handoff(
+                    actor, body["tag_no"], body["direction"],
+                    body["giver"], body["receiver"], body.get("deadline_ts"),
+                    body.get("cabinet"), body.get("note", ""), op), 201)
+            if path.startswith("/api/handoffs/") and path.endswith("/confirm"):
+                hid = path.split("/")[3]
+                return self._json(svc.confirm_handoff(
+                    actor, hid, body["side"], body.get("note", ""),
+                    body.get("inspection"), op))
+            if path.startswith("/api/handoffs/") and path.endswith("/cancel"):
+                hid = path.split("/")[3]
+                return self._json(svc.cancel_handoff(actor, hid, op))
+            if path.startswith("/api/handoffs/") and path.endswith("/amend"):
+                hid = path.split("/")[3]
+                return self._json(svc.amend_handoff(
+                    actor, hid, body["giver"], body["receiver"],
+                    body.get("deadline_ts"), op))
+            if path.startswith("/api/pods/") and path.endswith("/inspect"):
+                key = path.split("/")[3]
+                return self._json(svc.inspect_pod(
+                    actor, key, body["result"], body.get("note", ""), op))
+            if path.startswith("/api/pods/") and path.endswith("/release-line"):
+                key = path.split("/")[3]
+                return self._json(svc.release_pod_to_line(actor, key, op))
+            if path == "/api/investigations":
+                return self._json(svc.open_investigation(
+                    actor, body["pod"], body["reason"], body.get("evidence", ""), op), 201)
+            if path.startswith("/api/investigations/") and path.endswith("/confirm"):
+                iid = path.split("/")[3]
+                return self._json(svc.confirm_investigation_release(
+                    actor, iid, body["role"], body["new_holder"], op))
             if path == "/api/imports":
                 return self._json(svc.import_release(body["packet"] if "packet" in body
                                                      else body, actor), 201)

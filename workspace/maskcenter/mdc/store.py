@@ -249,6 +249,100 @@ CREATE TABLE IF NOT EXISTS package (
     finished_at  TEXT
 );
 
+-- ---------------------------------------------------------------- 实体掩模版匣（保管对象）
+CREATE TABLE IF NOT EXISTS pod (
+    id                 TEXT PRIMARY KEY,
+    tag_no             TEXT NOT NULL UNIQUE,      -- 防拆标签号码
+    cabinet            TEXT NOT NULL DEFAULT '',  -- 柜位
+    responsible_person TEXT NOT NULL,             -- 当前责任人（保管链持有人）
+    set_id             TEXT,                      -- 可选：关联 mask set
+    status             TEXT NOT NULL DEFAULT 'IN_STORE',
+        -- IN_STORE 在库 / IN_TRANSIT 流转中 / UNDER_INVESTIGATION 调查中
+    frozen_by_handoff  TEXT,                      -- 被哪一笔 PENDING 交接申请冻结
+    line_released_at   TEXT,                      -- 双方确认后发往生产线的时间
+    created_by         TEXT NOT NULL,
+    created_at         TEXT NOT NULL
+);
+
+-- ---------------------------------------------------------------- 保管交接申请
+CREATE TABLE IF NOT EXISTS handoff (
+    id             TEXT PRIMARY KEY,
+    pod_id         TEXT,               -- 标签号码错误时也留申请，故允许 NULL
+    tag_no         TEXT NOT NULL,      -- 申请时扫码得到的标签（审计原始值）
+    direction      TEXT NOT NULL,      -- OUTBOUND 出库 / INBOUND 入库
+    giver_id       TEXT NOT NULL,      -- 交出者（计划责任人，必须有 CUSTODIAN 职责）
+    receiver_id    TEXT NOT NULL,      -- 计划接收者（每笔只认一个接收者）
+    requested_by   TEXT NOT NULL,
+    requested_at   TEXT NOT NULL,
+    status         TEXT NOT NULL,      -- PENDING/CONFIRMED/CANCELLED/REJECTED/EXPIRED
+    reject_code    TEXT,
+    reject_message TEXT,
+    deadline_ts    TEXT NOT NULL,      -- 确认期限
+    cabinet        TEXT,               -- 入库时指定的归位柜位（可选）
+    note           TEXT NOT NULL DEFAULT '',
+    completed_at   TEXT
+);
+-- 同一版匣至多一笔未决交接：部分唯一索引兜底并发冻结裁决
+CREATE UNIQUE INDEX IF NOT EXISTS idx_handoff_pending
+    ON handoff(pod_id) WHERE status='PENDING';
+
+CREATE TABLE IF NOT EXISTS handoff_confirmation (
+    handoff_id TEXT NOT NULL,
+    side       TEXT NOT NULL,          -- GIVER 交出 / RECEIVER 接收
+    person_id  TEXT NOT NULL,
+    at         TEXT NOT NULL,
+    note       TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY(handoff_id, side)      -- 同一边先完成者唯一取得确认权
+);
+
+-- ---------------------------------------------------------------- 历次保管关系（只追加）
+CREATE TABLE IF NOT EXISTS custody_record (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    pod_id       TEXT NOT NULL,
+    holder_person TEXT NOT NULL,
+    cabinet      TEXT NOT NULL DEFAULT '',
+    handoff_id   TEXT,                 -- REGISTER 行为 NULL
+    reason       TEXT NOT NULL,        -- REGISTER/OUTBOUND/INBOUND/INVESTIGATION/INVESTIGATION_RELEASED
+    started_at   TEXT NOT NULL,
+    ended_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_custody_pod ON custody_record(pod_id, started_at);
+
+-- ---------------------------------------------------------------- 入库检查
+CREATE TABLE IF NOT EXISTS inspection (
+    id          TEXT PRIMARY KEY,
+    pod_id      TEXT NOT NULL,
+    handoff_id  TEXT,
+    inspector   TEXT NOT NULL,
+    result      TEXT NOT NULL,         -- OK / TAG_DAMAGED 标签破损
+    note        TEXT NOT NULL DEFAULT '',
+    at          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_inspection_pod ON inspection(pod_id, at);
+
+-- ---------------------------------------------------------------- 版匣调查
+CREATE TABLE IF NOT EXISTS investigation (
+    id            TEXT PRIMARY KEY,
+    pod_id        TEXT NOT NULL,
+    inspection_id TEXT,
+    reason        TEXT NOT NULL,
+    evidence      TEXT NOT NULL DEFAULT '',
+    opened_by     TEXT NOT NULL,
+    opened_at     TEXT NOT NULL,
+    status        TEXT NOT NULL DEFAULT 'OPEN', -- OPEN / RELEASED
+    released_at   TEXT
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_investigation_open
+    ON investigation(pod_id) WHERE status='OPEN';
+
+CREATE TABLE IF NOT EXISTS investigation_confirm (
+    investigation_id TEXT NOT NULL,
+    role             TEXT NOT NULL,    -- SAFETY 安全员 / PROCESS 工艺负责人
+    person_id        TEXT NOT NULL,
+    at               TEXT NOT NULL,
+    PRIMARY KEY(investigation_id, role)
+);
+
 -- ---------------------------------------------------------------- 审计
 CREATE TABLE IF NOT EXISTS audit_log (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +368,12 @@ SEED_PEOPLE = [
     ("u_disp1",  "调度员·晨", ["DISPATCHER"]),
     ("u_disp2",  "调度员·岳", ["DISPATCHER"]),
     ("u_admin",  "中心管理员", ["ADMIN"]),
+    # 实体保管链：库房管理员、两名保管责任人、安全员、工艺负责人
+    ("u_keeper", "库房管理员·封", ["KEEPER"]),
+    ("u_phys1",  "保管责任人·线边甲", ["CUSTODIAN"]),
+    ("u_phys2",  "保管责任人·线边乙", ["CUSTODIAN"]),
+    ("u_safety", "安全员·祁", ["SAFETY"]),
+    ("u_proc",   "工艺负责人·甄", ["PROCESS"]),
 ]
 
 

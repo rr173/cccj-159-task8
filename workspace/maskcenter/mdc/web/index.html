@@ -30,10 +30,11 @@ th,td{border-bottom:1px solid #e5e7eb;padding:7px 8px;text-align:left;vertical-a
 th{background:#f1f5f9;font-weight:600;white-space:nowrap}
 tr:hover td{background:#f8fafc}
 .tag{display:inline-block;border-radius:999px;padding:1px 9px;font-size:11px;font-weight:600}
-.t-VALID,.t-READY,.t-EXPOSED,.t-COMMITTED,.t-ACTIVE,.t-EXECUTED,.t-ACCEPTED_AS_ALIAS{background:#dcfce7;color:var(--ok)}
-.t-QUARANTINED,.t-PENDING,.t-RESERVED,.t-BUILDING,.t-BOUND{background:#fef9c3;color:var(--warn)}
-.t-INVALID,.t-SUPERSEDED,.t-REJECTED,.t-FAILED,.t-CANCELLED,.t-EXPIRED{background:#fee2e2;color:var(--err)}
-.t-SEALED,.t-MASTER,.t-REVISION,.t-DELTA{background:#dbeafe;color:#1e40af}
+.t-VALID,.t-READY,.t-EXPOSED,.t-COMMITTED,.t-ACTIVE,.t-EXECUTED,.t-ACCEPTED_AS_ALIAS,.t-CONFIRMED,.t-IN_STORE,.t-RELEASED{background:#dcfce7;color:var(--ok)}
+.t-QUARANTINED,.t-PENDING,.t-RESERVED,.t-BUILDING,.t-BOUND,.t-IN_TRANSIT,.t-OPEN{background:#fef9c3;color:var(--warn)}
+.t-INVALID,.t-SUPERSEDED,.t-REJECTED,.t-FAILED,.t-CANCELLED,.t-EXPIRED,.t-UNDER_INVESTIGATION{background:#fee2e2;color:var(--err)}
+.t-SEALED,.t-MASTER,.t-REVISION,.t-DELTA,.t-OUTBOUND,.t-INBOUND,.t-GIVER,.t-RECEIVER,.t-REGISTER{background:#dbeafe;color:#1e40af}
+.t-INVESTIGATION,.t-INVESTIGATION_RELEASED,.t-CUSTODIAN,.t-KEEPER{background:#ede9fe;color:#5b21b6}
 .finding{border-left:3px solid var(--bd);padding:8px 10px;margin:6px 0;background:#f8fafc;border-radius:0 6px 6px 0}
 .finding.error{border-color:var(--err);background:#fef2f2}
 .finding.warning{border-color:#ca8a04;background:#fefce8}

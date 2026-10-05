@@ -155,6 +155,79 @@ class ApiCase(unittest.TestCase):
         rows = self.call("GET", "/api/audit?limit=10")[1]
         self.assertTrue(any(r["action"] == "release.import" for r in rows))
 
+    # ------------------------------------------------------------ 保管交接链
+    def test_custody_chain_over_http(self):
+        s, reg = self.call("POST", "/api/pods", {
+            "tag_no": "TAG-" + self.suffix, "cabinet": "A-1",
+            "responsible_person": "u_phys1"}, actor="u_keeper")
+        self.assertEqual(s, 201)
+        tag, pod_id = reg["tag_no"], reg["pod_id"]
+        s, h = self.call("POST", "/api/handoffs", {
+            "tag_no": tag, "direction": "OUTBOUND",
+            "giver": "u_phys1", "receiver": "u_phys2"}, actor="u_keeper", op="CH1")
+        self.assertEqual(s, 201)
+        # 未双方确认前不得发线
+        s, blocked = self.call("POST", f"/api/pods/{pod_id}/release-line", {},
+                               actor="u_keeper")
+        self.assertEqual(blocked["error"], "POD_HANDOFF_NOT_CONFIRMED")
+        # 被另一申请冻结
+        s, frozen = self.call("POST", "/api/handoffs", {
+            "tag_no": tag, "direction": "OUTBOUND",
+            "giver": "u_phys1", "receiver": "u_phys2"}, actor="u_keeper", op="CH2")
+        self.assertEqual(frozen["reject_code"], "HANDOFF_FROZEN_BY_OTHER")
+        # 非指定人不能确认
+        s, bad = self.call("POST", f"/api/handoffs/{h['handoff_id']}/confirm",
+                           {"side": "GIVER"}, actor="u_phys2")
+        self.assertEqual(bad["error"], "HANDOFF_NOT_DESIGNATED")
+        # 双方分开确认
+        self.call("POST", f"/api/handoffs/{h['handoff_id']}/confirm",
+                  {"side": "GIVER"}, actor="u_phys1", op="CHG")
+        s, done = self.call("POST", f"/api/handoffs/{h['handoff_id']}/confirm",
+                            {"side": "RECEIVER"}, actor="u_phys2", op="CHR")
+        self.assertEqual(done["pod_status"], "IN_TRANSIT")
+        s, rl = self.call("POST", f"/api/pods/{pod_id}/release-line", {},
+                          actor="u_keeper", op="CRL")
+        self.assertEqual(s, 200)
+        # 待办 / 保管关系 / 异常详情
+        self.assertEqual(self.call("GET", "/api/todos", actor="u_phys2")[1], [])
+        chain = self.call("GET", f"/api/custody/{tag}", actor="u_keeper")[1]
+        self.assertEqual([c["reason"] for c in chain["chain"]],
+                         ["REGISTER", "OUTBOUND"])
+        exc = self.call("GET", "/api/custody-exceptions", actor="u_keeper")[1]
+        self.assertTrue(any(r["reject_code"] == "HANDOFF_FROZEN_BY_OTHER"
+                            for r in exc["rejected_handoffs"]))
+
+    def test_custody_rejected_request_is_queryable(self):
+        s, rej = self.call("POST", "/api/handoffs", {
+            "tag_no": "TAG-UNKNOWN-" + self.suffix, "direction": "OUTBOUND",
+            "giver": "u_phys1", "receiver": "u_phys2"}, actor="u_keeper")
+        self.assertEqual(s, 201)
+        self.assertEqual(rej["status"], "REJECTED")
+        self.assertEqual(rej["reject_code"], "HANDOFF_TAG_NOT_FOUND")
+        rows = self.call("GET", "/api/handoffs?status=REJECTED",
+                         actor="u_keeper")[1]
+        self.assertTrue(any(r["id"] == rej["handoff_id"] for r in rows))
+
+    def test_investigation_release_requires_two_distinct_persons_http(self):
+        self.call("POST", "/api/pods", {
+            "tag_no": "TAG-INV-" + self.suffix, "cabinet": "A",
+            "responsible_person": "u_phys1"}, actor="u_keeper")
+        s, inv = self.call("POST", "/api/pods/TAG-INV-" + self.suffix + "/inspect",
+                           {"result": "TAG_DAMAGED", "note": "破损"}, actor="u_keeper")
+        self.assertEqual(inv["pod_status"], "UNDER_INVESTIGATION")
+        iid = inv["investigation_id"]
+        self.call("POST", f"/api/investigations/{iid}/confirm",
+                  {"role": "SAFETY", "new_holder": "u_phys1"}, actor="u_safety")
+        s, same = self.call("POST", f"/api/investigations/{iid}/confirm",
+                            {"role": "PROCESS", "new_holder": "u_phys1"},
+                            actor="u_safety")
+        self.assertEqual(same["error"], "INVESTIGATION_SAME_PERSON")
+        s, done = self.call("POST", f"/api/investigations/{iid}/confirm",
+                            {"role": "PROCESS", "new_holder": "u_phys1"},
+                            actor="u_proc")
+        self.assertEqual(done["status"], "RELEASED")
+        self.assertEqual(done["pod_status"], "IN_STORE")
+
 
 if __name__ == "__main__":
     unittest.main()

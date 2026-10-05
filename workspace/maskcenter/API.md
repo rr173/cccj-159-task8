@@ -11,7 +11,7 @@
 
 | 头 | 说明 |
 |---|---|
-| `X-Person-Id` | 操作自然人 id（`u_mei/u_tao/u_disp1/u_disp2/u_admin`），缺失 → 401 `UNAUTHORIZED` |
+| `X-Person-Id` | 操作自然人 id（`u_mei/u_tao/u_disp1/u_disp2/u_admin/u_keeper/u_phys1/u_phys2/u_safety/u_proc`），缺失 → 401 `UNAUTHORIZED` |
 | `X-Op-Id` | 可选，**原操作编号**；同编号安全重试，冲突/过期见下 |
 
 操作编号语义：同编号+同载荷已提交 → 回放首次响应（`replayed:true`）；
@@ -136,6 +136,73 @@ error_count,warning_count,findings[]}`，每条 finding：
 `MANIFEST.json` 含：`delivery_no,mask_set_id,kind,release_name,die,scribe_um,
 corner,fab,foundry_recipe_id,exposure_order,dependencies,masks[],read_only,
 manifest_sha256`。
+
+## 实体掩模版匣保管交接链
+
+库房给版匣登记**防拆标签、柜位和责任人**；出库/入库由交出者与接收者**分开确认**。
+每笔交接只认一个接收者，请求编号重复送达回放首次结果；同一侧两人争抢确认权仅先完成者取得保管权。
+全部状态落 SQLite，服务重启后接续未过期待办并清除失效冻结。
+
+### POST /api/pods（KEEPER 库房管理员）
+`{tag_no, cabinet, responsible_person, set?}` →
+`{pod_id, tag_no, cabinet, responsible_person, status:IN_STORE}`；
+责任人必须具备 `CUSTODIAN` 职责（否则 `HANDOFF_PERSON_NO_DUTY`）；
+重复标签 `POD_TAG_EXISTS`。
+
+### GET /api/pods?status= · GET /api/pods/{id 或 tag_no}
+版匣详情含当前责任人、冻结申请、开放调查和**历次保管关系** `custody_chain[]`。
+
+### POST /api/handoffs（KEEPER 或 CUSTODIAN）
+```json
+{"tag_no":"TAG-001","direction":"OUTBOUND","giver":"u_phys1","receiver":"u_phys2",
+ "deadline_ts":"2030-01-01T00:00:00Z","cabinet":"A-01","note":""}
+```
+- 合法：`{status:PENDING, handoff_id, requires:[GIVER,RECEIVER]}`，版匣被该申请**冻结**。
+- 下列情况也**留下申请**（`status:REJECTED` + `reject_code/message`，可在
+  `GET /api/handoffs?status=REJECTED` 查到），且不占用冻结：
+  `HANDOFF_TAG_NOT_FOUND`（标签号码错误，pod_id 为 null）、
+  `HANDOFF_PERSON_NO_DUTY`（交出者/接收者无 CUSTODIAN 职责）、
+  `HANDOFF_SAME_PERSON`、`HANDOFF_GIVER_NOT_HOLDER`、
+  `HANDOFF_FROZEN_BY_OTHER`（已被另一未决申请冻结，detail 给出冻结申请）、
+  `HANDOFF_DEADLINE_PASSED`（申请时期限已过）、
+  `POD_NOT_IN_STORE` / `POD_NOT_IN_TRANSIT`（方向与版匣状态不符）、
+  `POD_UNDER_INVESTIGATION`（调查中禁止出库/再次出库）。
+- `deadline_ts` 省略时取服务默认确认期限。
+
+### POST /api/handoffs/{id}/confirm
+`{side: GIVER|RECEIVER, note?, inspection?: OK|TAG_DAMAGED}`，
+只能由该笔指定的交出者/接收者本人提交（否则 403 `HANDOFF_NOT_DESIGNATED`）。
+第一签返回 `status:PENDING`；两签齐备移交保管权（出库→`IN_TRANSIT`，入库→`IN_STORE`，
+入库时 `cabinet` 归位）。同一侧并发争抢：主键兜底，先完成者成功，余者
+`HANDOFF_SIDE_TAKEN`；已有一方确认后撤销/换人分别被
+`HANDOFF_CONFIRMATION_EXISTS` / `HANDOFF_PARTY_LOCKED` 拒绝。
+确认时已过期限 → `HANDOFF_DEADLINE_PASSED`，申请置 `EXPIRED` 并清除版匣冻结；
+对 `REJECTED/CONFIRMED/CANCELLED/EXPIRED` 申请的晚到确认一律 `HANDOFF_DECIDED`/原拒绝码，不推翻既有决定。
+入库接收确认携带 `inspection:"TAG_DAMAGED"` 时，保管权归位后**立即转入调查**并禁止再次出库。
+
+### POST /api/handoffs/{id}/cancel · POST /api/handoffs/{id}/amend
+撤销仅允许**申请人或 KEEPER**，已有一方确认即禁止；amend 替换交出者/接收者
+`{giver,receiver,deadline_ts?}`，规则同上，首签后 `HANDOFF_PARTY_LOCKED`。
+
+### POST /api/pods/{id}/inspect（KEEPER）
+`{result: OK|TAG_DAMAGED, note}`：标签破损 → 自动开启调查（版匣
+`UNDER_INVESTIGATION`，禁止出库与发生产线）；`GET /api/inspections?pod=` 可查。
+
+### POST /api/pods/{id}/release-line（KEEPER）
+**双方确认结束之前不得把版匣发给生产线**：无已确认出库交接或仍有未决冻结 →
+`POD_HANDOFF_NOT_CONFIRMED`；调查中 → `POD_UNDER_INVESTIGATION`。
+成功记录 `line_released_at`，重复调用幂等 `noop:true`。
+
+### 调查：POST /api/investigations · POST /api/investigations/{id}/confirm · GET /api/investigations?status=
+安全员/库房可直接登记调查 `{pod,reason,evidence?}`。解除调查必须由
+**安全员 SAFETY 与工艺负责人 PROCESS 两个不同自然人**分别确认
+`{role,new_holder}`：第一签返回 `requires`；同一自然人即使兼两职也以
+`INVESTIGATION_SAME_PERSON` 拒绝；双签齐备 → 调查 `RELEASED`、版匣回 `IN_STORE`、
+责任人改为 `new_holder`（须有 CUSTODIAN 职责）。**先前保管关系仍可查询**。
+
+### 查询：GET /api/todos?person= · GET /api/custody/{id或tag} · GET /api/handoffs?status=&pod=&person= · GET /api/custody-exceptions
+待办返回该自然人尚未确认的一侧 `waiting_for_me[]`；保管关系给出完整保管链；
+异常详情汇总被拒/过期交接、标签破损检查与全部调查。
 
 ## 隔离处置 / 审计
 

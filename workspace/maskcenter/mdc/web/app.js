@@ -9,7 +9,7 @@ const TABS = [
   ["dashboard", "总览"], ["content", "资料上传"], ["import", "发行导入"],
   ["artifacts", "构件关系"], ["sets", "发行 / Mask Set"],
   ["schedule", "曝光排程"], ["replace", "替换与返工"], ["packages", "交付包"],
-  ["quarantine", "隔离处置"], ["audit", "审计 / 裁决"],
+  ["custody", "版匣保管"], ["quarantine", "隔离处置"], ["audit", "审计 / 裁决"],
 ];
 
 function toast(msg, kind = "info", ms = 6000) {
@@ -542,6 +542,113 @@ PAGES.quarantine = async () => {
       toast("处置完成：" + r.status, "ok"); PAGES.quarantine();
     } catch (e) { toast(`${e.error}: ${e.message}`, "err"); }
   };
+};
+
+// --------------------------------------------------------------- 版匣保管
+PAGES.custody = async () => {
+  view.innerHTML = `
+  <div class="card"><h2>实体版匣扫码工作台</h2>
+    <div class="row">
+      <div class="field"><label>Mask Set（MS 编号）</label><input id="cset"></div>
+      <div class="field"><label>防拆标签</label><input id="clabel" placeholder="TAG-..."></div>
+      <div class="field"><label>柜位</label><input id="ccab" placeholder="A-01"></div>
+      <button class="btn" id="creg">登记版匣</button>
+      <button class="btn sec" id="crefresh">刷新待办</button>
+    </div>
+    <div class="muted">出库/入库均需交出者和唯一接收者分别确认；标签错误、职责不符、冻结或超期都会保留申请。</div>
+  </div>
+  <div class="card"><h2>申请交接</h2>
+    <div class="row">
+      <div class="field"><label>版匣/标签</label><input id="cpod"></div>
+      <div class="field"><label>方向</label><select id="cdir"><option>OUTBOUND</option><option>INBOUND</option></select></div>
+      <div class="field"><label>扫描标签</label><input id="cscan"></div>
+      <div class="field"><label>接收者（留空=首个合格者）</label><input id="crecv"></div>
+      <div class="field"><label>入库柜位</label><input id="ctarget"></div>
+      <div class="field"><label>期限秒</label><input id="cttl" value="300"></div>
+      <button class="btn" id="creq">申请</button>
+    </div>
+  </div>
+  <div class="card"><h2>待处理</h2><div id="ctodo"></div></div>
+  <div class="card"><h2>版匣 / 异常</h2><div id="cpods"></div></div>`;
+
+  const load = async () => {
+    const [todo, pods, exc] = await Promise.all([
+      api("/api/custody/todo"), api("/api/custody/pods"),
+      api("/api/custody/exceptions")]);
+    $("#ctodo").innerHTML = `
+      <h4>待确认交接</h4><table><thead><tr><th>申请</th><th>版匣</th><th>方向</th>
+      <th>交出者</th><th>接收者</th><th>期限</th><th>操作</th></tr></thead><tbody>${
+      todo.transfers.map(t => `<tr><td class=mono>${t.id}</td><td>${t.pod_id}</td>
+        <td>${t.direction}</td><td>${t.surrender_person}</td>
+        <td>${t.receiver_person || "（待首个接收者锁定）"}</td><td>${t.deadline_at}</td>
+        <td><a onclick="cConfirm('${t.id}')">当前登录人确认</a> ·
+            <a onclick="cCancel('${t.id}')">撤销</a></td></tr>`).join("")
+        || '<tr><td colspan=7 class=muted>无</td></tr>'}</tbody></table>
+      <h4>待入库检查</h4>${todo.inspections.map(p => `${p.id}
+        <a onclick="cInspect('${p.id}','INTACT')">标签完好</a> /
+        <a onclick="cInspect('${p.id}','LABEL_DAMAGED')">标签破损</a>`).join("<br>") || '<span class=muted>无</span>'}
+      <h4>待解除调查</h4><table><thead><tr><th>调查</th><th>版匣</th><th>确认</th>
+      <th>新标签</th><th>操作</th></tr></thead><tbody>${todo.investigations.map(i =>
+        `<tr><td class=mono>${i.id}</td><td>${i.pod_id}</td>
+        <td>${i.confirmations.map(c=>c.role+":"+c.person_id).join(" ") || "—"}</td>
+        <td>${i.new_label_no || "未更换"}</td>
+        <td><a onclick="cRelabel('${i.pod_id}','${i.id}')">换标签</a> ·
+        <a onclick="cInvest('${i.id}')">当前角色确认</a></td></tr>`).join("")
+        || '<tr><td colspan=5 class=muted>无</td></tr>'}</tbody></table>`;
+    $("#cpods").innerHTML = `<h4>版匣</h4><table><thead><tr><th>版匣</th><th>标签</th>
+      <th>柜位</th><th>责任人</th><th>状态</th><th>链</th></tr></thead><tbody>${
+      pods.map(p => `<tr><td class=mono>${p.id}</td><td>${p.label_no}</td>
+      <td>${p.cabinet}</td><td>${p.owner_person_id}</td><td>${tag(p.status)}</td>
+      <td><a onclick="cHistory('${p.id}')">历次保管关系</a></td></tr>`).join("")
+      || '<tr><td colspan=6 class=muted>无</td></tr>'}</tbody></table>
+      <h4>拒收/超期申请</h4><table><thead><tr><th>申请</th><th>版匣</th><th>状态</th>
+      <th>原因</th></tr></thead><tbody>${
+      exc.rejected_or_expired_transfers.map(t => `<tr><td class=mono>${t.id}</td>
+      <td>${t.pod_id}</td><td>${tag(t.status)}</td><td>${t.reject_reason}</td></tr>`)
+      .join("") || '<tr><td colspan=4 class=muted>无</td></tr>'}</tbody></table>
+      <pre id="chist" class="json" style="display:none"></pre>`;
+  };
+  const sets = await api("/api/sets");
+  $("#cset").value = sets.find(s => s.status !== "SUPERSEDED")?.delivery_no || "";
+  $("#creg").onclick = async () => {
+    try { await api("/api/custody/pods", {method:"POST", json:{
+      set:$("#cset").value,label_no:$("#clabel").value,cabinet:$("#ccab").value}});
+      toast("版匣已登记", "ok"); await load();
+    } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }
+  };
+  $("#creq").onclick = async () => {
+    try { const r = await api("/api/custody/transfers", {method:"POST", json:{
+      pod:$("#cpod").value,direction:$("#cdir").value,label_no:$("#cscan").value,
+      receiver_person_id:$("#crecv").value || null,cabinet:$("#ctarget").value || null,
+      ttl_seconds:Number($("#cttl").value || 300)}});
+      toast(`交接申请 ${r.transfer_id}`, "ok"); await load();
+    } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }
+  };
+  $("#crefresh").onclick = load;
+  window.cConfirm = async id => { try { await api(`/api/custody/transfers/${id}/confirm`,
+    {method:"POST"}); toast("确认已记录", "ok"); await load();
+  } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }};
+  window.cCancel = async id => { try { await api(`/api/custody/transfers/${id}/cancel`,
+    {method:"POST"}); toast("已撤销/重放首次撤销", "ok"); await load();
+  } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }};
+  window.cInspect = async (pod,result) => { try { await api("/api/custody/inspections",
+    {method:"POST",json:{pod,result}}); toast("检查已记录", "ok"); await load();
+  } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }};
+  window.cInvest = async id => { try { const r = await api(
+    `/api/custody/investigations/${id}/confirm`,{method:"POST"});
+    toast(r.status === "RELEASED" ? "调查已解除" : "确认已记录", "ok"); await load();
+  } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }};
+  window.cRelabel = async pod => {
+    const label = prompt("输入新防拆标签号码"); if (!label) return;
+    try { await api("/api/custody/relabel",{method:"POST",json:{pod,label_no:label}});
+      toast("标签已更换", "ok"); await load();
+    } catch(e){ toast(`${e.error}: ${e.message}`, "err", 9000); }};
+  window.cHistory = async id => {
+    const h = await api(`/api/custody/pods/${id}/history`);
+    const el = $("#chist"); el.style.display="block";
+    el.textContent = JSON.stringify(h, null, 2);
+  };
+  await load();
 };
 
 // --------------------------------------------------------------- 审计

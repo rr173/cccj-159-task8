@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("windows")
     sub.add_parser("lots")
     sub.add_parser("packages")
+    sub.add_parser("pods")
+    sub.add_parser("custody-todo")
+    sub.add_parser("custody-exceptions")
     sub.add_parser("quarantine")
     sub.add_parser("arbitrations")
     sp = sub.add_parser("audit"); sp.add_argument("--target"); sp.add_argument("--op")
@@ -103,6 +106,32 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--op"); sp.add_argument("--as", dest="actor", required=True)
     sp = sub.add_parser("download"); sp.add_argument("package"); sp.add_argument("--out")
 
+    sp = sub.add_parser("pod-register")
+    sp.add_argument("--set", required=True); sp.add_argument("--label", required=True)
+    sp.add_argument("--cabinet", required=True); sp.add_argument("--owner")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", default="u_wh1")
+    sp = sub.add_parser("custody-request")
+    sp.add_argument("pod"); sp.add_argument("--direction", choices=["OUTBOUND", "INBOUND"],
+                                            required=True)
+    sp.add_argument("--label", required=True); sp.add_argument("--receiver")
+    sp.add_argument("--surrender"); sp.add_argument("--cabinet")
+    sp.add_argument("--ttl", type=int, default=300); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("custody-confirm"); sp.add_argument("transfer")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("custody-cancel"); sp.add_argument("transfer")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", required=True)
+    sp = sub.add_parser("custody-inspect"); sp.add_argument("pod")
+    sp.add_argument("--result", choices=["INTACT", "LABEL_DAMAGED"], required=True)
+    sp.add_argument("--note", default=""); sp.add_argument("--op")
+    sp.add_argument("--as", dest="actor", default="u_wh1")
+    sp = sub.add_parser("custody-history"); sp.add_argument("pod")
+    sp = sub.add_parser("relabel")
+    sp.add_argument("pod"); sp.add_argument("--label", required=True)
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", default="u_wh1")
+    sp = sub.add_parser("investigation-confirm"); sp.add_argument("investigation")
+    sp.add_argument("--op"); sp.add_argument("--as", dest="actor", required=True)
+
     sp = sub.add_parser("quarantine-resolve")
     sp.add_argument("qid"); sp.add_argument("--decision", required=True,
                                             choices=["ACCEPT_AS_ALIAS", "REJECT"])
@@ -140,6 +169,12 @@ def main(argv=None) -> int:
             _print(svc.list_lots())
         elif c == "packages":
             _print(svc.list_packages())
+        elif c == "pods":
+            _print(svc.custody.list_pods())
+        elif c == "custody-todo":
+            _print(svc.custody.list_todo(None))
+        elif c == "custody-exceptions":
+            _print(svc.custody.list_exceptions())
         elif c == "quarantine":
             _print(svc.list_quarantine())
         elif c == "arbitrations":
@@ -199,6 +234,28 @@ def main(argv=None) -> int:
             out = Path(args.out or f"{args.package}.tar")
             out.write_bytes(p.read_bytes())
             _print({"saved": str(out), "sha256": row["sha256"]})
+        elif c == "pod-register":
+            _print(svc.custody.register_pod(args.actor, args.set, args.label,
+                                            args.cabinet, args.owner, args.op))
+        elif c == "custody-request":
+            _print(svc.custody.request_transfer(
+                args.actor, args.pod, args.direction, args.label, args.receiver,
+                args.surrender, args.cabinet, "", args.ttl, None, args.op))
+        elif c == "custody-confirm":
+            _print(svc.custody.confirm_transfer(args.actor, args.transfer, args.op))
+        elif c == "custody-cancel":
+            _print(svc.custody.cancel_transfer(args.actor, args.transfer, args.op))
+        elif c == "custody-inspect":
+            _print(svc.custody.inspect_inbound(args.actor, args.pod, args.result,
+                                               args.note, args.op))
+        elif c == "custody-history":
+            _print(svc.custody.custody_history(args.pod))
+        elif c == "relabel":
+            _print(svc.custody.relabel_during_investigation(
+                args.actor, args.pod, args.label, args.op))
+        elif c == "investigation-confirm":
+            _print(svc.custody.confirm_investigation(
+                args.actor, args.investigation, args.op))
         elif c == "quarantine-resolve":
             _print(svc.resolve_quarantine(args.actor, args.qid, args.decision,
                                           args.new_name))

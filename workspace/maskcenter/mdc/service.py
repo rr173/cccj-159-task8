@@ -25,6 +25,7 @@ from .domain import (DomainError, canonical_bytes, canonical_hash,
                      delivery_number, parse_layer_inventory, scan_gds_layers,
                      LayoutScanError)
 from .importer import Importer, ROLE_RANK
+from .custody import CustodyService
 from .store import Store, utcnow
 
 DEFAULT_TTL_SECONDS = 300
@@ -39,6 +40,7 @@ class Service:
         self.s = store
         self.importer = Importer(store)
         self.ttl = int(ttl_seconds)
+        self.custody = CustodyService(self)
         self.recover_on_startup()
 
     # ================================================================ 身份
@@ -61,7 +63,8 @@ class Service:
 
     def create_person(self, actor: str, person_id: str, name: str, roles: list[str]):
         self.require_role(actor, "ADMIN")
-        valid = {"ME", "STEWARD", "DISPATCHER", "ADMIN"}
+        valid = {"ME", "STEWARD", "DISPATCHER", "ADMIN", "WAREHOUSE",
+                 "WAREHOUSE_ADMIN", "LINE", "SAFETY", "PROCESS"}
         if not set(roles) <= valid:
             raise DomainError("INVALID_ROLES", f"角色必须是 {sorted(valid)} 的子集", 400)
         if self.s.q_one("SELECT 1 FROM person WHERE id=?", (person_id,)):
@@ -334,7 +337,8 @@ class Service:
 
     # ================================================================ 幂等操作
     def idempotent(self, op_id: str | None, kind: str, payload: dict,
-                   fn: Callable[[], Any], *, actor: str | None = None) -> dict:
+                   fn: Callable[[], Any], *, actor: str | None = None,
+                   ttl_seconds: int | None = None) -> dict:
         """以原操作编号安全重试的执行包装。
 
         - 同编号已提交 → 回放首次响应（replayed:true）
@@ -353,7 +357,8 @@ class Service:
                             (op_id,)).fetchone()
             if row:
                 return self._replay_op(row, ph)
-            expires = (parse_ts(now) + timedelta(seconds=self.ttl)).strftime(
+            expires = (parse_ts(now) + timedelta(seconds=ttl_seconds if ttl_seconds is not None
+                                                 else self.ttl)).strftime(
                 "%Y-%m-%dT%H:%M:%S.000Z")
             c.execute(
                 "INSERT INTO operation(id,kind,identity,payload_hash,status,created_at,"
@@ -656,6 +661,7 @@ class Service:
                 if s["status"] == "SUPERSEDED":
                     raise DomainError("SET_SUPERSEDED",
                                       "节点已被替换，请对替换版重新排程后曝光", 409)
+                self.custody.assert_set_issued_to_line(s["id"])
                 lot = c.execute("SELECT * FROM lot WHERE id=?", (w["lot_id"],)).fetchone() \
                     if w["lot_id"] else None
                 if not lot or lot["set_id"] != s["id"]:
@@ -800,6 +806,7 @@ class Service:
                 # 第二签：执行替换 → 新谱系节点
                 new_set = self._build_revision(c, s, r["mask_name"], r["new_sha"],
                                                r["new_name"], r["requested_by"])
+                self.custody.migrate_set_pod(c, s["id"], new_set["id"])
                 migrated = self._migrate_windows(c, old_set_id=s["id"],
                                                  new_set_id=new_set["id"])
                 # 下游排程重算的一部分：绑定旧节点的 lot 一并指向新节点
@@ -1261,11 +1268,8 @@ class Service:
 
     # ================================================================ 启动恢复
     def recover_on_startup(self):
-        """进程异常退出后：
-        1) BUILDING 交付包 → 依据持久状态继续构建；
-        2) PENDING 且未过期的操作 → 视为裁决中断，过期作废，不自动重放副作用；
-        3) 窗口/仲裁全部已在各自事务中落盘，天然一致。
-        """
+        """进程异常退出后恢复保管冻结、未完成交付包和中断操作。"""
+        custody = self.custody.recover_on_startup()
         with self.s.tx() as c:
             pending_ops = c.execute(
                 "SELECT id FROM operation WHERE status='PENDING'").fetchall()
@@ -1302,4 +1306,5 @@ class Service:
                              detail={"expired_ops": expired,
                                      "resumed_packages": [b["id"] for b in building]})
         return {"expired_operations": expired,
-                "resumed_packages": [b["id"] for b in building]}
+                "resumed_packages": [b["id"] for b in building],
+                **custody}

@@ -85,7 +85,32 @@ GDSII 会被真正解析（最小记录流扫描）提取 `L<layer>.<datatype>`�
 - 第二签生效：生成 `REVISION` 新谱系节点（同 lineage，seq+1），旧节点 `SUPERSEDED`，
   未曝光窗口与 lot 绑定原子迁移到新节点（下游排程重算）。替换构件会先做层适用性与摘要校验。
 
-### 持久化与崩溃恢复
+### 实体版匣保管交接链
+
+库房为每个实体掩模版匣登记防拆标签、柜位和当前责任人，操作页为 `/custody`（单页中的
+"版匣保管"标签，浏览器直达 `/#custody`），API 前缀 `/api/custody`。
+
+- **双方确认**：出库为 `WAREHOUSE → LINE`，入库为 `LINE → WAREHOUSE`；交出者与接收者
+  分别确认，每笔交接只认一个接收者。创建申请时可不指定接收者，此时第一个具有接收职责的
+  自然人以条件更新原子锁定接收权；其他竞争者得到 `RECEIVER_MISMATCH`。
+- **申请留痕与冻结**：标签号码错误（`LABEL_MISMATCH`）、人员缺少职责
+  （`PERSON_ROLE_INVALID`）、版匣已有未决交接（`POD_FROZEN`）或确认期限已过
+  （`CONFIRMATION_DEADLINE_PASSED`）都会留下 `REJECTED/EXPIRED` 申请和明确原因；
+  PENDING 交接冻结版匣，未双方确认前曝光门禁返回 `POD_NOT_ISSUED`。
+- **请求幂等**：保管类操作使用长期有效的原操作编号（`X-Op-Id`），同编号同载荷重放
+  第一次结果；一方确认后不能替换交出者或接收者，晚到确认、再次撤销均不能推翻终态。
+- **撤销**：只有申请人或库房管理员可在完成前撤销；撤销清除冻结并恢复原责任人。
+- **入库检查/调查**：入库完成后版匣处于 `AWAITING_INSPECTION`。标签完好转入库位；
+  标签破损则进入 `INVESTIGATING`，禁止再次出库但历次保管关系仍完整可查。
+- **解除调查**：破损标签必须先由库房管理员更换；解除需安全员（SAFETY）与工艺负责人
+  （PROCESS）由不同自然人确认，然后恢复 `IN_STORAGE`。
+- **持久化与重启**：申请、确认、撤销、检查、换标和调查均写入 SQLite；启动时接续未过期
+  PENDING 待办，自动过期超期交接并清除冻结。
+
+预置保管角色：`u_wh1/u_wh2`（库房）、`u_line1/u_line2`（生产线）、`u_safe`（安全员）、
+`u_proc`（工艺负责人）。
+
+## 持久化与崩溃恢复
 - 资料、占用、批准、谱系、仲裁、交付包、操作日志全部在 SQLite（WAL、`synchronous=FULL`）。
 - 交付包构建采用**先落 BUILDING 状态行、再写文件**；进程重启时 `Service.__init__`
   自动把 BUILDING 包**幂等续建**为 READY（tar 确定性：mtime=0、mode=0444、无 owner），
@@ -112,6 +137,9 @@ GDSII 会被真正解析（最小记录流扫描）提取 `L<layer>.<datatype>`�
 | `u_mei` | 制造工程师 ME |
 | `u_tao` | 版图负责人 STEWARD |
 | `u_disp1` / `u_disp2` | 两名调度员 DISPATCHER |
+| `u_wh1` / `u_wh2` | 库房管理员/保管员 WAREHOUSE（u_wh1 兼 WAREHOUSE_ADMIN） |
+| `u_line1` / `u_line2` | 生产线接收员 LINE |
+| `u_safe` / `u_proc` | 安全员 SAFETY / 工艺负责人 PROCESS |
 | `u_admin` | 管理员 ADMIN（隔离处置、账号管理） |
 
 ## 测试
@@ -122,4 +150,5 @@ python -m unittest discover -s tests -t .
 
 覆盖：导入规范化/去重、全部拒收定位、同名隔离处置、并发抢占唯一赢家、
 操作编号安全重试/过期/载荷冲突、曝光次序、双签不同自然人、谱系封存、
-delta+返工跨谱系拒绝、交付包确定性/篡改/崩溃续建、HTTP 全流程。
+delta+返工跨谱系拒绝、交付包确定性/篡改/崩溃续建、实体版匣双方保管/竞争接收/
+检查调查/重启恢复、HTTP 全流程。

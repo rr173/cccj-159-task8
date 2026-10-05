@@ -249,6 +249,108 @@ CREATE TABLE IF NOT EXISTS package (
     finished_at  TEXT
 );
 
+-- ---------------------------------------------------------------- 实体版匣保管链
+CREATE TABLE IF NOT EXISTS custody_pod (
+    id              TEXT PRIMARY KEY,
+    set_id          TEXT,                          -- 可绑定 mask set；发行交付时建立物理实体
+    label_no        TEXT NOT NULL UNIQUE,          -- 防拆标签号码
+    cabinet         TEXT NOT NULL,                 -- 柜位
+    owner_person_id TEXT NOT NULL,                 -- 当前责任人
+    status          TEXT NOT NULL DEFAULT 'IN_STORAGE',
+                                    -- IN_STORAGE/OUTBOUND_PENDING/INBOUND_PENDING/
+                                    -- ISSUED_TO_LINE/RETURNING/AWAITING_INSPECTION/INVESTIGATING
+    created_by      TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_pod_owner ON custody_pod(owner_person_id);
+CREATE INDEX IF NOT EXISTS idx_pod_set ON custody_pod(set_id);
+
+CREATE TABLE IF NOT EXISTS custody_transfer (
+    id               TEXT PRIMARY KEY,
+    pod_id           TEXT,                          -- 未识别版匣的拒收申请也保留
+    direction        TEXT NOT NULL,               -- OUTBOUND/INBOUND
+    surrender_person TEXT NOT NULL,               -- 交出者
+    receiver_person  TEXT,                        -- 指定或首个有效接收确认者
+    requested_by    TEXT NOT NULL,
+    status          TEXT NOT NULL,               -- PENDING/COMPLETED/CANCELLED/REJECTED/EXPIRED
+    reject_reason   TEXT NOT NULL DEFAULT '',
+    cabinet         TEXT NOT NULL DEFAULT '',
+    note            TEXT NOT NULL DEFAULT '',
+    deadline_at     TEXT NOT NULL,
+    created_at      TEXT NOT NULL,
+    completed_at    TEXT,
+    cancelled_at    TEXT,
+    decided_at      TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_transfer_pod ON custody_transfer(pod_id, created_at);
+DROP INDEX IF EXISTS idx_active_transfer_pod;
+-- 一个版匣任一时刻只允许一个未决交接冻结；终态不阻塞新申请。
+CREATE UNIQUE INDEX IF NOT EXISTS idx_active_transfer_pod
+    ON custody_transfer(pod_id) WHERE status='PENDING';
+
+CREATE TABLE IF NOT EXISTS custody_confirmation (
+    transfer_id TEXT NOT NULL,
+    side        TEXT NOT NULL,                    -- SURRENDER/RECEIVER
+    person_id   TEXT NOT NULL,
+    role        TEXT NOT NULL,
+    at          TEXT NOT NULL,
+    op_id       TEXT,
+    PRIMARY KEY(transfer_id, side)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_confirmation_one_receiver
+    ON custody_confirmation(transfer_id) WHERE side='RECEIVER';
+
+CREATE TABLE IF NOT EXISTS custody_relation (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    pod_id      TEXT NOT NULL,
+    transfer_id TEXT,
+    event       TEXT NOT NULL,
+    from_person TEXT,
+    to_person   TEXT,
+    person_id   TEXT,
+    cabinet     TEXT,
+    label_no    TEXT,
+    at          TEXT NOT NULL,
+    detail_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_custody_relation_pod ON custody_relation(pod_id, id);
+
+CREATE TABLE IF NOT EXISTS custody_inspection (
+    id               TEXT PRIMARY KEY,
+    pod_id           TEXT NOT NULL,
+    transfer_id      TEXT,
+    result           TEXT NOT NULL,               -- INTACT/LABEL_DAMAGED
+    inspector_person TEXT NOT NULL,
+    label_no         TEXT NOT NULL,
+    at               TEXT NOT NULL,
+    note             TEXT NOT NULL DEFAULT ''
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_inspection_pod_transfer
+    ON custody_inspection(pod_id, COALESCE(transfer_id, ''));
+
+CREATE TABLE IF NOT EXISTS custody_investigation (
+    id             TEXT PRIMARY KEY,
+    pod_id         TEXT NOT NULL,
+    inspection_id  TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'OPEN',  -- OPEN/RELEASED
+    reason         TEXT NOT NULL,
+    opened_by      TEXT NOT NULL,
+    opened_at      TEXT NOT NULL,
+    closed_at      TEXT,
+    new_label_no   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_investigation_pod ON custody_investigation(pod_id, opened_at);
+
+CREATE TABLE IF NOT EXISTS investigation_confirmation (
+    investigation_id TEXT NOT NULL,
+    role             TEXT NOT NULL,               -- SAFETY/PROCESS
+    person_id        TEXT NOT NULL,
+    at               TEXT NOT NULL,
+    op_id            TEXT,
+    PRIMARY KEY(investigation_id, role)
+);
+
 -- ---------------------------------------------------------------- 审计
 CREATE TABLE IF NOT EXISTS audit_log (
     id     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -274,6 +376,12 @@ SEED_PEOPLE = [
     ("u_disp1",  "调度员·晨", ["DISPATCHER"]),
     ("u_disp2",  "调度员·岳", ["DISPATCHER"]),
     ("u_admin",  "中心管理员", ["ADMIN"]),
+    ("u_wh1",    "库房管理员·岚", ["WAREHOUSE", "WAREHOUSE_ADMIN"]),
+    ("u_wh2",    "库房保管员·岩", ["WAREHOUSE"]),
+    ("u_line1",  "生产线接收员·珩", ["LINE"]),
+    ("u_line2",  "生产线接收员·琛", ["LINE"]),
+    ("u_safe",   "安全员·衡", ["SAFETY"]),
+    ("u_proc",   "工艺负责人·澈", ["PROCESS"]),
 ]
 
 
@@ -313,6 +421,9 @@ class Store:
                     conn.execute(
                         "INSERT OR IGNORE INTO person(id,name,roles) VALUES(?,?,?)",
                         (pid, name, json.dumps(roles, ensure_ascii=False)))
+                    conn.execute(
+                        "UPDATE person SET name=?,roles=? WHERE id=?",
+                        (name, json.dumps(roles, ensure_ascii=False), pid))
             finally:
                 conn.close()
 

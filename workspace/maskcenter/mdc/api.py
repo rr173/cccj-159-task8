@@ -86,6 +86,15 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._json(svc.list_replacements(q.get("status", [None])[0]))
             if path == "/api/rework-plans":
                 return self._json(svc.list_rework_plans())
+            if path == "/api/custody/pods":
+                return self._json(svc.custody.list_pods(q.get("status", [None])[0]))
+            if path == "/api/custody/transfers":
+                return self._json(svc.custody.list_transfers(
+                    q.get("status", [None])[0], q.get("pod", [None])[0]))
+            if path == "/api/custody/todo":
+                return self._json(svc.custody.list_todo(self._actor() or None))
+            if path == "/api/custody/exceptions":
+                return self._json(svc.custody.list_exceptions())
             if path == "/api/packages":
                 return self._json(svc.list_packages())
             if path == "/api/quarantine":
@@ -108,6 +117,11 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._json(svc.get_release(path.rsplit("/", 1)[1]))
             if path.startswith("/api/sets/"):
                 return self._json(svc.get_set(path.rsplit("/", 1)[1]))
+            if path.startswith("/api/custody/pods/") and path.endswith("/history"):
+                pod = path.split("/")[4]
+                return self._json(svc.custody.custody_history(pod))
+            if path.startswith("/api/custody/pods/"):
+                return self._json(svc.custody.get_pod(path.rsplit("/", 1)[1]))
             if path.startswith("/api/packages/") and path.endswith("/download"):
                 pkg_id = path.split("/")[3]
                 p, row = svc.get_package_file(pkg_id)
@@ -200,6 +214,31 @@ class ApiHandler(BaseHTTPRequestHandler):
                 return self._json(svc.create_rework_plan(
                     actor, body["lot_id"], body["delta"],
                     body.get("note", ""), op), 201)
+            if path == "/api/custody/pods":
+                return self._json(svc.custody.register_pod(
+                    actor, body["set"], body["label_no"], body["cabinet"],
+                    body.get("owner_person_id"), op), 201)
+            if path == "/api/custody/transfers":
+                return self._json(svc.custody.request_transfer(
+                    actor, body["pod"], body["direction"], body["label_no"],
+                    body.get("receiver_person_id"), body.get("surrender_person_id"),
+                    body.get("cabinet"), body.get("note", ""),
+                    body.get("ttl_seconds"), body.get("deadline_at"), op), 201)
+            if path.startswith("/api/custody/transfers/") and path.endswith("/confirm"):
+                tid = path.split("/")[4]
+                return self._json(svc.custody.confirm_transfer(actor, tid, op), 200)
+            if path.startswith("/api/custody/transfers/") and path.endswith("/cancel"):
+                tid = path.split("/")[4]
+                return self._json(svc.custody.cancel_transfer(actor, tid, op), 200)
+            if path == "/api/custody/inspections":
+                return self._json(svc.custody.inspect_inbound(
+                    actor, body["pod"], body["result"], body.get("note", ""), op), 201)
+            if path == "/api/custody/relabel":
+                return self._json(svc.custody.relabel_during_investigation(
+                    actor, body["pod"], body["label_no"], op), 200)
+            if path.startswith("/api/custody/investigations/") and path.endswith("/confirm"):
+                iid = path.split("/")[4]
+                return self._json(svc.custody.confirm_investigation(actor, iid, op), 200)
             if path == "/api/packages":
                 return self._json(svc.build_package(actor, body["set"], op), 201)
             if path.startswith("/api/quarantine/") and path.endswith("/resolve"):

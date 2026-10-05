@@ -151,6 +151,27 @@ class ApiCase(unittest.TestCase):
         self.assertEqual(s5, 200)
         self.assertEqual(hashlib.sha256(data).hexdigest(), pk["sha256"])
 
+    def test_custody_chain_over_http(self):
+        _, pod = self.call("POST", "/api/custody/pods", {
+            "set": self.dno, "label_no": "HTTP-TAG-1", "cabinet": "A-01",
+            "owner_person_id": "u_wh1"}, actor="u_wh1")
+        self.assertEqual(pod["status"], "IN_STORAGE")
+        s1, tr = self.call("POST", "/api/custody/transfers", {
+            "pod": pod["pod_id"], "direction": "OUTBOUND",
+            "label_no": "HTTP-TAG-1", "receiver_person_id": "u_line1",
+            "ttl_seconds": 300}, actor="u_wh1", op="CUST-REQ")
+        self.assertEqual(s1, 201)
+        self.call("POST", f"/api/custody/transfers/{tr['transfer_id']}/confirm",
+                  {}, actor="u_wh1", op="CUST-C1")
+        _, done = self.call("POST", f"/api/custody/transfers/{tr['transfer_id']}/confirm",
+                            {}, actor="u_line1", op="CUST-C2")
+        self.assertEqual(done["new_pod_status"], "ISSUED_TO_LINE")
+        _, detail = self.call("GET", f"/api/custody/pods/{pod['pod_id']}/history")
+        self.assertTrue(any(x["event"] == "OUTBOUND_COMPLETED"
+                            for x in detail["relations"]))
+        _, todo = self.call("GET", "/api/custody/todo", actor="u_line1")
+        self.assertIsInstance(todo["transfers"], list)
+
     def test_audit_present(self):
         rows = self.call("GET", "/api/audit?limit=10")[1]
         self.assertTrue(any(r["action"] == "release.import" for r in rows))
